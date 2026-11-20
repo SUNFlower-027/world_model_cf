@@ -1,0 +1,62 @@
+# 正式实验配置：有混淆线索 + 正常动作训练
+# 运行：py -m wmcf.train_world_model --config configs/default.yaml
+seed: 0
+device: auto
+run_name: confounded_vanilla
+
+data:
+  img_size: 64
+  n_actions: 4          # 0=左 1=右 2=上 3=下，必须与模型一致
+  n_episodes: 64
+  episode_len: 96
+  confound: true         # 帧内背景色 = 当前动作的“意图线索”，制造走捷径通道
+  tint_strength: 0.45
+  behavior_noise: 0.15   # 行为策略随机性
+  eval_episodes: 24
+  eval_episode_len: 96
+  eval_behavior_noise: 0.20
+  eval_confound: true    # 评估时保留线索，干预才会与线索冲突
+
+model:
+  n_actions: 4
+  embed_dim: 256
+  hidden_dim: 128
+  stoch: 32             # 每类离散潜变量的类别数
+  classes: 32           # 潜变量组数
+  width: 32             # CNN 基础通道数
+  kl_free_bits: 1.0
+  kl_balance: 0.8
+
+train:
+  batch_size: 16
+  seq_len: 20
+  steps: 3000
+  lr: 0.0003
+  eps: 0.0001
+  grad_clip: 100.0
+  action_shuffle: 0.0   # 负对照：>0 时按比例打乱动作，训练出“无视动作”的世界模型
+  inverse_dynamics_coef: 0.1   # P06 的逆动力学正则，促使潜变量编码动作信息
+  log_every: 50
+  ckpt_every: 500
+  out_dir: outputs/runs
+
+agent:
+  imagine_horizon: 15
+  gamma: 0.997
+  lambda: 0.95
+  lr: 0.0003
+  entropy_coef: 0.001
+  steps: 1000
+  batch_size: 16
+  seq_len: 20
+  log_every: 50
+  ckpt_every: 250
+  out_dir: outputs/runs
+
+eval:
+  n_states: 128          # 参与干预分析的 (轨迹, 干预步) 数量上限
+  horizon: 12
+  intervention_steps: [0, 2, 4]
+  modes: [one_step, persistent]
+  n_prior_samples: 16    # 估计随机噪声底
+  out_dir: outputs/cf

@@ -1,0 +1,61 @@
+# 冒烟测试配置：CPU 上几分钟内跑通全流程
+seed: 0
+device: cpu
+run_name: smoke
+
+data:
+  img_size: 32
+  n_actions: 4
+  n_episodes: 16
+  episode_len: 40
+  confound: true
+  tint_strength: 0.45
+  behavior_noise: 0.15
+  eval_episodes: 8
+  eval_episode_len: 40
+  eval_behavior_noise: 0.20
+  eval_confound: true
+
+model:
+  n_actions: 4
+  embed_dim: 64
+  hidden_dim: 64
+  stoch: 8
+  classes: 8
+  width: 16
+  kl_free_bits: 1.0
+  kl_balance: 0.8
+
+train:
+  batch_size: 4
+  seq_len: 8
+  steps: 20
+  lr: 0.0003
+  eps: 0.0001
+  grad_clip: 100.0
+  action_shuffle: 0.0
+  inverse_dynamics_coef: 0.1
+  log_every: 5
+  ckpt_every: 10
+  out_dir: outputs/runs
+
+agent:
+  imagine_horizon: 4
+  gamma: 0.997
+  lambda: 0.95
+  lr: 0.0003
+  entropy_coef: 0.001
+  steps: 5
+  batch_size: 4
+  seq_len: 8
+  log_every: 1
+  ckpt_every: 5
+  out_dir: outputs/runs
+
+eval:
+  n_states: 8
+  horizon: 4
+  intervention_steps: [0, 2]
+  modes: [one_step, persistent]
+  n_prior_samples: 4
+  out_dir: outputs/cf
