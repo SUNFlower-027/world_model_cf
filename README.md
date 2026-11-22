@@ -89,6 +89,20 @@ Start-Process ".runtime\CARLA_0.9.15\CarlaUE4.exe" -ArgumentList "-carla-port=20
 | 降低 `num_vehicles` 后频繁提前结束 | 策略训练分布是 50 辆；实测降到 10 辆时回报只有 281–409，演示保持 50 |
 | 同样 seed 结果不同 | Traffic Manager 的随机源未被固定；KPI 需多 episode 取均值，不能合并不同次的样本 |
 
+### 0.6 接口映射（设计文档 → 代码）
+
+对照设计文档里 5 个必需接口，给出实际代码位置与归属（`A` = 本项目代码，`B` = 上游 CarDreamer，位于 `.runtime/`，不入库）：
+
+| 设计文档接口 | 归属 | 在本仓库？ | 代码位置 |
+| --- | --- | --- | --- |
+| 原始 CarDreamer Actor 的动作调用 | A/B | ✅ 调用层在 | [run_demo.py](wmcf/carla/run_demo.py) `agent.policy(*a, mode="eval")`；[counterfactual_demo.py](wmcf/carla/counterfactual_demo.py) 同 |
+| 当前时刻 RSSM 状态获取 | A/B | ✅ 有 | [counterfactual_demo.py](wmcf/carla/counterfactual_demo.py) 逐真实观测更新后验存入 `posts`，`start = posts[anchor]` 作为反事实起点；RSSM 句柄 `wm.rssm` |
+| 多候选动作 imagine | A/B | ✅ 有 | [counterfactual_demo.py](wmcf/carla/counterfactual_demo.py) `imagine_fn`（`rssm.img_step` + decoder）、`rollout`，动作映射见 `INTERVENTIONS` |
+| CARLA 动作执行 | B | ⚠️ 底层不在 | 调用层：[run_demo.py](wmcf/carla/run_demo.py) `embodied.Driver(env)`；真正把动作发给车辆的是上游 CarDreamer 的 env（`.runtime/CarDreamer`，被 `.gitignore` 排除） |
+| 碰撞 / 终点 / 出车道 KPI 记录 | A | ✅ 有 | [counterfactual_demo.py](wmcf/carla/counterfactual_demo.py) `_episode_kpis` / `_write_kpi`；[run_demo.py](wmcf/carla/run_demo.py) 写 `metrics.jsonl` |
+
+> 设计文档里 `A/B` 表示“接口由本项目调用 / 底层由 CarDreamer 提供”。`CARLA 动作执行` 的底层实现属于运行时依赖，不在本仓库，复刻时需先按 0.3 装好 CarDreamer。
+
 ---
 
 ## 1. 研究问题与假设
