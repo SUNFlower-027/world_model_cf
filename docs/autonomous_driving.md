@@ -378,6 +378,219 @@ CarDreamer 的 DreamerV3 是 JAX 实现，内部接口大致为：
 - 两段均在 `time_limit=500` 前结束，回报处于到达终点量级；`run_demo.py` 当前只记录长度与回报，未单独记录 `collision` 标志。
 - 视频展示的是「世界模型驱动的闭环行驶」，不是反事实想象，也不是训练过程。
 
+### 5.7 接口与对接参考（后续任务对接用）
+
+> 本节把 CARLA 闭环与反事实干预链路涉及的 6 类接口落到可对接的签名、字段形状与代码位置。
+> 归属标注：**A** = 本仓库代码（已入库）；**B** = 上游 CarDreamer / DreamerV3（位于 `.runtime/`，被 `.gitignore` 排除，复刻时需先装好，见 README 0.3）。
+> 所有形状与字段均核对自实际源码，不做推测。模型配置为 `dreamerv3.yaml` 的 `defaults + small`（`rssm.deter=512`），见 `wmcf/carla/run_demo.py` L74-78 与 `wmcf/carla/load_check.py` L58-67。
+
+#### 5.7.1 Actor 接口：policy 的输入、输出与循环状态
+
+- 入口：`agent = dreamerv3.Agent(env.obs_space, env.act_space, step, dv3)`（`wmcf/carla/run_demo.py` L137）。
+- 调用：`agent.policy(obs, state, mode="eval")`（项目里用 `lambda *a: agent.policy(*a, mode="eval")` 固定 eval，见 `run_demo.py` L242 / `counterfactual_demo.py` L567）。
+- 实际实现：`.runtime/CarDreamer/dreamerv3/jaxagent.py:50` `JAXAgent.policy(self, obs, state=None, mode="train")`——把输入搬到 device、必要时初始化 state，再调内层 `self.agent.policy`（`.runtime/CarDreamer/dreamerv3/agent.py:47`）。
+- **输入 `obs`**：dict，**batch 维在最前**（Driver 用 `BatchEnv` 包一层，B=1）。关键字段：
+  - `birdeye_wpt`：`[B, 128, 128, 3]` uint8——策略唯一使用的图像（`encoder.cnn_keys: "birdeye_wpt"`，`tasks.yaml` L54）；
+  - `camera`：`[B, 512, 512, 3]` uint8——只录像/显示，不进 encoder；
+  - `is_first` / `is_terminal`：`[B]` bool；`reward`：`[B]` float32。
+  - 内层 `Agent.preprocess`（`agent.py` L114-125）会把 uint8 图像除以 255、其余转 float32，并补 `cont = 1 - is_terminal`。
+- **输入 `state`（循环状态）**：跨 step 传递，`None` 时 `JAXAgent.policy` 调 `policy_initial` 初始化（`jaxagent.py` L55-56）。实际结构是内层 `Agent.policy_initial` 返回的三元组（`agent.py` L37-42）：
+  ```python
+  state = (
+      (prev_latent, prev_action),   # WorldModel 循环状态（prev_latent 见 5.7.4）
+      task_state,                   # task_behavior（Greedy）状态
+      expl_state,                   # expl_behavior 状态
+  )
+  ```
+  `prev_action` 形状 `[B, 15]`，即上一步的 one-hot 动作。
+- **输出 `(outs, state)`**：`outs["action"]` 是采样后的 **15 维 one-hot**，形状 `[B, 15]` float32（`mode="eval"` 时来自 `task_behavior`，`agent.py` L56-59）；`state` 是更新后的循环状态，需原样传回下一步。
+- 最小调用示例（来自 `wmcf/carla/load_check.py`，无需 CARLA）：
+  ```python
+  state = None
+  for t in range(steps):
+      obs = {"birdeye_wpt": rng.randint(0, 255, (1, 128, 128, 3), np.uint8),
+             "is_first": np.array([t == 0]),
+             "is_terminal": np.array([False]),
+             "reward": np.zeros(1, np.float32)}
+      outs, state = agent.policy(obs, state, mode="eval")
+      action = np.asarray(outs["action"])[0]   # shape (15,), one-hot
+  ```
+- 归属：**B**（DreamerV3）。本项目只构造 + 调用，不改实现。
+
+#### 5.7.2 Driver 接口：policy 如何被调用、action 如何执行
+
+- 入口：`driver = embodied.Driver(env)`（`run_demo.py` L238 / `counterfactual_demo.py` L565）。
+- 实现：`.runtime/CarDreamer/dreamerv3/embodied/core/driver.py`。
+  - `on_step(fn)`：每步调一次 `fn(trn, inf, worker)`；
+  - `on_episode(fn)`：每个 episode 结束调一次 `fn(ep, ep_info, worker)`；
+  - `__call__(policy, steps=0, episodes=0)`：循环到满足步数或 episode 数。
+- 单步 `_step`（`driver.py` L42-76）的关键顺序：
+  1. `obs, info = self._env.step(acts)`——用上一步存下的动作推进 env；
+  2. `acts, self._state = policy(obs, self._state)`——调策略（传给 policy 的签名即 `policy(obs, state)`）；
+  3. 把 `{**obs, **acts}` 作为 transition 累积进 `self._eps`，把 `info` 累积进 `self._eps_info`；
+  4. 若 `obs["is_last"]`，触发该环境的 `on_episode` 回调，`ep` / `ep_info` 是 list 转成的数组 dict。
+- 项目用法：
+  - `driver.on_episode(per_episode)` 收 KPI / 存 episode 数据（`run_demo.py` L239、`counterfactual_demo.py` L566）；
+  - `driver.on_step(lambda tran, info, _: step.increment())` 计步；
+  - `policy = lambda *a: agent.policy(*a, mode="eval")` 固定 eval 模式；
+  - 主循环：`while step < run_args.steps: driver(policy, steps=100)`（`run_demo.py` L244-245），或 `driver(policy, episodes=1)`（`counterfactual_demo.py` L572）。
+- `ep` 的 key 来自 transition（`obs` 键 ∪ `acts` 键），如 `reward`、`action`、`birdeye_wpt`、`camera`、`is_first`、`is_last`；`ep_info` 的 key 来自 env 的 `info`（见 5.7.6）。每个 value 形状为 `(episode_len, ...)`。
+- 归属：**B**。
+
+#### 5.7.3 CARLA 环境接口：reset / step / 动作格式
+
+- 构造：`env, env_config = car_dreamer.create_task("carla_four_lane", [f"--env.world.carla_port={port}"])`（`run_demo.py` L82）。`env` 是 `gym.Env` 子类 `CarlaFourLaneEnv`（继承 `CarlaWptEnv → CarlaBaseEnv`）。
+- 本项目不直接调底层 env，而是包一层（`run_demo.py` L90-112）：
+  ```
+  FromGym(env) → OneHotAction / ExpandScalars / TimeLimit / ClipAction → BatchEnv([env])
+  ```
+  所以 Driver 看到的是包裹后的 env。
+- 底层 env 接口（`.runtime/CarDreamer/car_dreamer/carla_base_env.py`）：
+  - `reset() -> obs`（L92）：重建世界与 observer，返回首帧 obs dict；
+  - `step(action) -> (obs, reward, is_terminal, info)`（L140）：`action` 是 **int ∈ [0, 14]**（gym `Discrete(15)`）；内部 `apply_control` → `world.step()` tick 仿真 → 算 reward / terminal / obs。
+- 动作格式的两层转换：
+  1. 策略输出 15 维 one-hot → `OneHotAction.step`（`.runtime/CarDreamer/dreamerv3/embodied/core/wrappers.py:140-146`）用 `np.argmax(action["action"])` 转回整数 index，再传给底层 env；
+  2. 底层 `get_vehicle_control(index)`（`carla_base_env.py` L105-125）把 index 解码为 `(acc, steer)` 并构造 `carla.VehicleControl`（完整映射见 5.7.5）。
+- 观测（`carla_four_lane` 启用 `observation.enabled: [camera, collision, birdeye_wpt]`，`tasks.yaml` L39）：
+  - `camera`：`[512, 512, 3]` uint8（`common.yaml` L14-18）；
+  - `birdeye_wpt`：`[128, 128, 3]` uint8（`common.yaml` L75-96）——**唯一进 encoder 的图像**；
+  - `collision`：碰撞传感器信号；
+  - `FromGym` 额外补 `reward`、`is_first`、`is_last`、`is_terminal`（`from_gym.py` L33-39）。
+- 终止：`get_terminal_conditions`（`carla_wpt_env.py` L137-146）返回 `{is_collision, time_exceeded, out_of_lane, destination_reached}`，任一为真则终止；`time_limit=500`（`tasks.yaml` 的 `carla_wpt` 锚点 L15）。
+- 归属：**B**。本项目只通过 `create_task` + 包装器使用。
+
+#### 5.7.4 RSSM 状态说明：状态结构、更新方法、字段形状
+
+- 句柄获取（`counterfactual_demo.py` L215-217）：
+  ```python
+  wm = agent.agent.wm          # agent 是 JAXAgent，.agent 是内层 Agent，.wm 是 WorldModel
+  rssm = wm.rssm
+  encoder = wm.encoder
+  decoder = wm.heads["decoder"]
+  ```
+- 类定义：`.runtime/CarDreamer/dreamerv3/nets.py:23` `class RSSM`。
+- 配置（本项目 `defaults + small`）：`deter=512`、`stoch=32`、`classes=32`（`dreamerv3.yaml` defaults L64-69 设 `stoch/classes`，small L272 覆盖 `rssm.deter: 512`；`load_check.py` L67 打印 `deter={dv3.rssm.deter}` 确认）。
+- state dict 结构（分类模式 `classes>0`，`nets.py` L44-50），batch 维 `B`：
+
+  | 字段 | 形状 | 含义 |
+  | --- | --- | --- |
+  | `deter` | `[B, 512]` | GRU 确定性状态 `h_t` |
+  | `logit` | `[B, 32, 32]` | 32 组 categorical 的 logits，每组 32 类 |
+  | `stoch` | `[B, 32, 32]` | 采样后的 one-hot 离散状态 `z_t` |
+
+- 方法：
+  - `initial(bs) -> state`（`nets.py` L44）：返回零/可学习初始状态；单序列推理用 `bs=1`。
+  - `obs_step(prev_state, prev_action, embed, is_first) -> (post, prior)`（L105）：先 `img_step` 得先验，再用观测 embed 修正得**后验 post**；`embed = wm.encoder({"birdeye_wpt": image})`。
+  - `img_step(prev_state, prev_action) -> prior`（L125）：纯**先验**推进，不看观测，用于想象 rollout。
+  - 后验解码：`decoder(state)["birdeye_wpt"].mode()` 得到重建 BEV（`counterfactual_demo.py` L230）。
+- 项目典型用法（`counterfactual_demo.py` `_make_fns` / `_analyse`）：
+  ```python
+  state = rssm.initial(1)                                      # 初始
+  post, _ = rssm.obs_step(state, prev_action, embed, is_first) # 用真实观测更新后验
+  # post 存入 posts；start = posts[anchor] 作为反事实起点
+  prior = rssm.img_step(start, action)                         # 开环想象一步
+  frame = decoder(prior)["birdeye_wpt"].mode()
+  ```
+- 形状自洽校验（来自 `_js_divergence`，L240-248）：`prior["logit"]` 取 batch 0 后为 `[32, 32]`，softmax 沿末轴 → `[32, 32]`，沿末轴求和再均值 → 标量，与 `stoch=32 × classes=32` 一致。
+- 注意：`JAXAgent` 把 `jax_transfer_guard` 设为 `disallow`（`jaxagent.py` L148），反事实脚本在 `_analyse` 里改回 `allow`（`counterfactual_demo.py` L274）再建 PRNGKey，否则 host↔device 传输会被拒。
+- 归属：**B**。
+
+#### 5.7.5 动作映射表：15 个 action_id 与实际控制量
+
+- 来源：`common.yaml` L165-169（`discrete_acc=[-2, 0, 2]`、`discrete_steer=[-0.6, -0.2, 0, 0.2, 0.6]`）+ `carla_base_env.py` L76-81（维度）/ L105-125（解码为 `VehicleControl`）。
+- 维度：`n_acc=3`、`n_steer=5` → `action_space = Discrete(15)`；`action_id = acc_idx * n_steer + steer_idx`，即
+  `acc = discrete_acc[id // 5]`，`steer_cfg = discrete_steer[id % 5]`。
+- 转 CARLA 控制（L118-125）：`acc>0 → throttle=clip(acc/3, 0, 1), brake=0`；`acc≤0 → throttle=0, brake=clip(-acc/3, 0, 1)`；**`steer = -steer_cfg`**（CARLA 中 steer 正 = 左转，故对配置值取负）。
+- 完整映射（与 `counterfactual_demo.INTERVENTIONS` 自洽：刹车=2、保持=7、加速=12、左转=5、右转=9）：
+
+  | action_id | acc_idx | steer_idx | acc (m/s²) | config steer | CARLA steer | 含义 |
+  |---:|---:|---:|---:|---:|---:|---|
+  | 0 | 0 | 0 | −2 | −0.6 | +0.6 | 刹车 + 左转 |
+  | 1 | 0 | 1 | −2 | −0.2 | +0.2 | 刹车 + 轻左 |
+  | 2 | 0 | 2 | −2 | 0.0 | 0.0 | 刹车 |
+  | 3 | 0 | 3 | −2 | +0.2 | −0.2 | 刹车 + 轻右 |
+  | 4 | 0 | 4 | −2 | +0.6 | −0.6 | 刹车 + 右转 |
+  | 5 | 1 | 0 | 0 | −0.6 | +0.6 | 保持 + 左转 |
+  | 6 | 1 | 1 | 0 | −0.2 | +0.2 | 保持 + 轻左 |
+  | 7 | 1 | 2 | 0 | 0.0 | 0.0 | 保持（直行） |
+  | 8 | 1 | 3 | 0 | +0.2 | −0.2 | 保持 + 轻右 |
+  | 9 | 1 | 4 | 0 | +0.6 | −0.6 | 保持 + 右转 |
+  | 10 | 2 | 0 | +2 | −0.6 | +0.6 | 加速 + 左转 |
+  | 11 | 2 | 1 | +2 | −0.2 | +0.2 | 加速 + 轻左 |
+  | 12 | 2 | 2 | +2 | 0.0 | 0.0 | 加速 |
+  | 13 | 2 | 3 | +2 | +0.2 | −0.2 | 加速 + 轻右 |
+  | 14 | 2 | 4 | +2 | +0.6 | −0.6 | 加速 + 右转 |
+
+- 策略侧是 15 维 one-hot，`argmax` 即 `action_id`；`OneHotAction` wrapper 已保证 `min=0 / max=1 / sum=1`（`wrappers.py` L142-144）。
+- 归属：**B**。
+
+#### 5.7.6 KPI 接口：碰撞 / 终点 / 出车道等指标的获取方式
+
+- 每步 `info` dict 在底层 env 拼装（`carla_base_env.py` L150-156）：`info = {**env_state, **terminal_conds, **obs_info, **reward_info, "action": action}`。
+- `carla_four_lane` 继承 `carla_wpt`，关键字段（`carla_wpt_env.py` L117-146 + `base_planner.py` L141-145）：
+
+  | 字段 | 形状 | 类型 | 含义 / 来源 |
+  | --- | --- | --- | --- |
+  | `is_collision` | `[1]` | bool | `obs["collision"][0] > 0`（`carla_base_env.py` L165-170） |
+  | `out_of_lane` | `[1]` | bool | `wpt_dis > terminal.out_lane_thres`（thres=3，`tasks.yaml` L16） |
+  | `destination_reached` | `[1]` | bool | `len(waypoints) <= 3`（`carla_wpt_env.py` L134-135） |
+  | `time_exceeded` | `[1]` | bool | `_time_step > time_limit`（limit=500） |
+  | `terminal` | `[1]` | bool | 上述任一为真 |
+  | `episode_timesteps` | `[1]` | int | 终止时的步数（仅终止时存在） |
+  | `timesteps` | `[1]` | int | 当前步（env_state，`carla_wpt_env.py` L44） |
+  | `speed_norm` | `[1]` | float | 车速模长 ‖v‖（m/s） |
+  | `wpt_dis` | `[1]` | float | 到下一路点距离（m） |
+  | `ttc` | `[1]` | float | 最小碰撞时间（`TTCCalculator`，`toolkit/carla_manager/utils.py`） |
+  | `travel_distance` | `[1]` | float | **单步**行驶增量（m），KPI 聚合时 `.sum()` 得总距离 |
+  | `ego_x` / `ego_y` | `[1]` | float | 自车位置 |
+  | `speed_parallel` / `speed_perpendicular` | `[1]` | float | 沿 / 垂直路点方向的速度 |
+  | `r_waypoints` / `r_speed` / `r_collision` / `r_out_of_lane` | `[1]` | float | 各奖励分量 |
+  | `num_completed` / `num_obsolete` | `[1]` | int | planner 统计 |
+
+- 键名前缀：`common.yaml` L2 `eval: False`，故 info 键**不带** `eval_` 前缀，项目 `_episode_kpis` 直接读 `is_collision` 等。若把 `eval` 置 True，所有键会被加 `eval_` 前缀（`carla_base_env.py` L157-159），下游聚合键名需同步改。
+- 累积与聚合：Driver 把每步 `info` 按 key 堆成 list，episode 结束时 `ep_info[key]` 是 `(T, 1)` 数组传给 `on_episode` 回调。项目 `_episode_kpis(ep_info)`（`counterfactual_demo.py` L134-167）做四类聚合：
+  - `rate(key)`：`arr.max() > 0` → 该 episode 是否发生（碰撞 / 出车道 / 到达 / 超时的 0/1）；
+  - `mean(key)`：均值（`speed_norm`、`wpt_dis`）；
+  - `total(key)`：求和（`travel_distance` → 总行驶距离）；
+  - `max_of(key)`：最大值（`wpt_dis` → 最大横向偏差）。
+  结果写入 `kpi.csv` / `kpi_table.md`（`_write_kpi`，L170-210）。
+- 另一条输出链路：`run_demo.py` L118-133 用 `embodied.logger.JSONLOutput(logdir, "metrics.jsonl")`，靠 `run.log_keys_sum/mean/max` 的正则（如 `travel_distance|destination_reached|out_of_lane|time_exceeded|is_collision`）筛选写入；字段来源同样是 env info。
+- 归属：字段定义在 **B**（CarDreamer env），聚合 / 落盘在 **A**（`counterfactual_demo._episode_kpis/_write_kpi`、`run_demo` 的 logger 配置）。
+
+#### 5.7.7 后续任务对接的接入点
+
+对应 README 0.2 列出的待办，给出可直接复用的接入点：
+
+1. **方向一致性检验**（`do(左转)` vs `do(右转)` 解码 BEV 是否反向偏移）
+   - 数据源：`outputs/<logdir>/branches.npz`（`counterfactual_demo.py` L465，`np.savez_compressed`）。
+   - 结构：`packed` 含 `camera`（uint8 `[H, 512, 512, 3]`，H=`horizon`）+ 各分支 key（float `[H, 128, 128, 3]`，值域 [0,1]）。分支 key 命名见 `BRANCH_VIDEOS`（L39-48）：文件名去掉 `branch_` 前缀和 `.mp4` 后缀、空格转下划线，即 `real`、`factual`、`do_brake`、`do_hold`、`do_accelerate`、`do_left`、`do_right`、`noise_floor`。
+   - 用法：`np.load("branches.npz")["do_left"]` 取帧，比较 `do_left` / `do_right` 相对 `factual` 的质心偏移方向是否相反。
+   - 注意：该文件是本地产物，不入库；需先跑 `counterfactual_demo.py` 生成。
+
+2. **动作置换负对照**（打乱动作标签，分歧应回落到噪声底）
+   - 接入点：`_analyse` 里的 `rollout(start, act_seq, rng_key)`（`counterfactual_demo.py` L311-321）。把 `factual_acts = actions[anchor:anchor+horizon]`（L336）换成 `np.random.permutation(factual_acts)`（沿时间维打乱），其余不变；得到的曲线应与 `noise` 分支接近。
+   - 也可在 `INTERVENTIONS`（L31-37）上做置换：随机重映射 15 个 action_id 后再 rollout。
+
+3. **真实强制动作对照**（真实 CARLA 里强制某动作，与世界模型想象对照）
+   - CARLA 无法克隆世界状态做严格反事实，只能近似：把 `driver` 的 policy 换成常动作函数，例如：
+     ```python
+     def constant_policy(action_id):
+         vec = np.zeros(15, np.float32); vec[action_id] = 1.0
+         return lambda obs, state: ({"action": vec[None]}, state)
+     driver(constant_policy(INTERVENTIONS["do(刹车)"]), episodes=1)
+     ```
+   - 或在 env 层固定路线 / 清空背景车（`num_vehicles=0`）降低随机性，比较真实轨迹与世界模型 `rollout` 解码 BEV。
+   - 注意：`num_vehicles` 降到 0 / 10 会让策略偏离训练分布（见 README 0.5），写结论时要标注分布偏移。
+
+4. **取某时刻 RSSM 后验 / 强制动作开环推演**
+   - 已实现：`posts = [逐时刻 obs_step 后的后验]`，`start = posts[anchor]`（L292-300、L335）；`rollout` 循环 `jit_imagine(varibs, key, state, action[None])`（L316）。
+   - 想换动作序列：直接改 `act_seq`（`[H, 15]` one-hot），调用 `rollout(start, act_seq, rng_key)` 即可，无需改模型。
+
+5. **加载与设备细节**
+   - checkpoint 是 Python pickle（`embodied.Checkpoint`），用 `checkpoint.load(path, keys=["agent"])`（`run_demo.py` L139-142）加载，**不要**用 `torch.load`。
+   - 原生 Windows JAX 0.4.34 为 CPU 后端，运行必须传 `--platform cpu`（→ `dreamerv3.jax.platform`）。
+   - 反事实推理前把 `jax_transfer_guard` 改回 `allow`（`counterfactual_demo.py` L274），否则 `device_put` 报错。
+
 ---
 
 ## 6. 报告图表清单

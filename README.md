@@ -30,6 +30,8 @@
 | 动作置换负对照 | 打乱动作标签后分歧应回落到噪声底，用于排除“换动作必然分叉” |
 | 真实强制动作对照 | CARLA 无法克隆世界状态，只能做固定路线/空交通的近似对照 |
 
+> 以上三项的接入点（`branches.npz` 结构、`rollout` 替换动作序列、常动作 policy、RSSM 后验取用）已整理在 [docs/autonomous_driving.md](docs/autonomous_driving.md) **5.7.7 节**；6 类接口的完整签名与字段形状见同文档 **5.7 节**。
+
 ### 0.3 复刻准备
 
 硬件：
@@ -102,6 +104,8 @@ Start-Process ".runtime\CARLA_0.9.15\CarlaUE4.exe" -ArgumentList "-carla-port=20
 | 碰撞 / 终点 / 出车道 KPI 记录 | A | ✅ 有 | [counterfactual_demo.py](wmcf/carla/counterfactual_demo.py) `_episode_kpis` / `_write_kpi`；[run_demo.py](wmcf/carla/run_demo.py) 写 `metrics.jsonl` |
 
 > 设计文档里 `A/B` 表示“接口由本项目调用 / 底层由 CarDreamer 提供”。`CARLA 动作执行` 的底层实现属于运行时依赖，不在本仓库，复刻时需先按 0.3 装好 CarDreamer。
+>
+> 这 5 个接口的**完整签名、输入/输出字段形状、调用示例与归属**，以及动作映射表、KPI 字段清单、后续任务对接接入点，统一整理在 [docs/autonomous_driving.md](docs/autonomous_driving.md) **5.7 节**（接口参考），对接前请先读该节，所有形状均核对自上游源码。
 
 ---
 
