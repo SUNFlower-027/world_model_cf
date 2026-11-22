@@ -3,10 +3,16 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.runtime/
 
 # 运行产物（模型权重、日志、图表）
 outputs/
 *.pt
+
+# CarDreamer 预训练权重（每个约 354 MiB，不入库）
+checkpoints/
+*.ckpt
+*.ckpt.part
 
 # 编辑器
 .idea/

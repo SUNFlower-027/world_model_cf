@@ -61,6 +61,28 @@ Pearl 的 do-calculus 主要处理"动作与隐藏混杂因素纠缠"时 $P(Y\mi
 本项目把同一问题扩展成**可重复的对照实验 + 轨迹级分歧曲线 + 真假值校验 + 负对照**，
 并显式构造"动作线索泄漏"的数据生成过程来制造捷径。
 
+### 2.1 智能驾驶场景（报告主线）
+
+为了让结论不只停留在合成环境，项目增加一条 **CARLA + CarDreamer** 的外部效度线：
+
+- 场景：四车道跟车，前车减速，比较 `do(刹车)` / `do(保持)` / `do(加速)` 下的想象轨迹；
+- 平台：[CarDreamer](https://github.com/ucd-dare/CarDreamer)（CARLA 0.9.15 + DreamerV3 JAX）；
+- 预训练权重：[HuggingFace](https://huggingface.co/ucd-dare/CarDreamer/tree/main/CarDreamer_checkpoints)（16 个任务，每个约 354 MiB）。
+
+完整的故事板、硬件/软件配置、实验步骤和风险降级方案见
+[docs/autonomous_driving.md](docs/autonomous_driving.md)。
+
+本目录新增的工具（不依赖 CARLA/JAX，可先跑）：
+
+```bash
+python -m wmcf.carla.checkpoints --list
+python -m wmcf.carla.checkpoints --download four_lane --dest checkpoints
+python -m wmcf.carla.checkpoints --inspect checkpoints/four_lane.ckpt
+python -m wmcf.carla.summarize_eval --logdir <CarDreamer eval logdir>
+```
+
+> 注意：CarDreamer checkpoint 是 Python pickle，不是 PyTorch 权重，**不要**用 `torch.load`。
+
 ---
 
 ## 3. 方法概览
@@ -112,6 +134,8 @@ world_model_cf/
 ├── configs/
 │   ├── default.yaml              # 正式实验
 │   └── smoke.yaml                # CPU 冒烟测试
+├── docs/
+│   └── autonomous_driving.md     # 智能驾驶场景：叙事、CarDreamer 配置、实验路线
 ├── wmcf/
 │   ├── config.py                 # YAML 配置 + --set 覆盖
 │   ├── utils.py                  # seed / device / JSON / CSV
@@ -120,7 +144,10 @@ world_model_cf/
 │   ├── models.py                 # Encoder / Decoder / RSSM / WorldModel / Actor / Critic
 │   ├── train_world_model.py      # 世界模型训练入口
 │   ├── train_agent.py            # 想象式 actor-critic（可选）
-│   └── counterfactual.py         # 干预、分歧指标、图表与 JSON
+│   ├── counterfactual.py         # 干预、分歧指标、图表与 JSON
+│   └── carla/
+│       ├── checkpoints.py        # CarDreamer checkpoint 列表/下载/检查
+│       └── summarize_eval.py     # CarDreamer metrics.jsonl → 报告表格/图
 └── outputs/                      # 运行产物（自动创建）
     ├── runs/<run_name>/          # wm.pt / ac.pt / 日志 / 配置快照
     └── cf/<run_name>/            # metrics.json / divergence_curves.csv / divergence.png
