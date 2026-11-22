@@ -8,6 +8,89 @@
 
 ---
 
+## 0. 当前进度与复刻入口（2026-11-22）
+
+### 0.1 已完成
+
+| 模块 | 状态 | 证据 / 产物 |
+| --- | --- | --- |
+| 合成环境代码基线 | 已完成 | `wmcf/envs.py`、`models.py`、`train_world_model.py`、`counterfactual.py`、`configs/smoke.yaml` |
+| CarDreamer checkpoint | 已完成 | `checkpoints/four_lane.ckpt`（约 354 MiB），纯 JAX 加载后能输出 15 维 one-hot 动作 |
+| CARLA + Python 环境 | 已完成 | `.runtime/CARLA_0.9.15`、`.runtime/venv`（Python 3.10）、CarDreamer 以 `--pth-file` 安装 |
+| 四车道闭环演示 | 已完成 | 91.6 秒双视角视频，两段 episode 461 / 452 步，回报 1061.4 / 1037.6 |
+| 反事实干预 | 已完成 | 3 个 seed 的闭环 KPI + 4 个起点 × 60 步潜空间分歧、噪声底与显著性阈值 |
+| 文档与脚本 | 已完成 | commit `805cadd`，细节见 [docs/autonomous_driving.md](docs/autonomous_driving.md) 第 5.5、5.6 节 |
+
+### 0.2 尚未完成
+
+| 事项 | 说明 |
+| --- | --- |
+| H1 / H2 多种子汇总 | CARLA 的 Traffic Manager 使用独立随机源，同样 seed 结果仍会不同；目前每次只有 3 个 episode |
+| 方向一致性检验 | 需要验证 `do(左转)` 与 `do(右转)` 在解码 BEV 中是否反向偏移，现有 `branches.npz` 可直接算 |
+| 动作置换负对照 | 打乱动作标签后分歧应回落到噪声底，用于排除“换动作必然分叉” |
+| 真实强制动作对照 | CARLA 无法克隆世界状态，只能做固定路线/空交通的近似对照 |
+
+### 0.3 复刻准备
+
+硬件：
+
+| 项 | 要求 | 本机实测 |
+| --- | --- | --- |
+| 系统 | Windows 10/11 64 位 | Windows，原生运行 |
+| GPU | NVIDIA，显存 ≥ 8 GB | RTX 4060 Laptop 8 GB |
+| 内存 | ≥ 16 GB | 24 GB |
+| 磁盘 | ≥ 30 GB | CARLA 压缩包 7.2 GB，解压后更大 |
+
+软件与资源：
+
+1. **CARLA 0.9.15 Windows 包**：`https://downloads.carlasim.com/Windows/CARLA_0.9.15.zip`，解压到 `.runtime/CARLA_0.9.15`。
+2. **DirectX 运行库**：若启动时报 `DirectX Runtime`，用 `directx_Jun2010_redist.exe` 解压后运行 `DXSETUP.exe /silent`；在线版 `dxwebsetup.exe` 可能返回 `-9`。
+3. **Python 3.10**：建议用 `uv` 或独立安装，不要污染系统 Python。
+4. **Python 依赖**：`carla==0.9.15`、`jax==0.4.34`、`jaxlib==0.4.34`（CPU）、`optax==0.2.2`、`tensorflow==2.13.0`、`tensorflow_probability==0.21.0`、`numpy==1.24.3`、`gym==0.12.5`、`imageio`、`opencv-python`。
+5. **CarDreamer 源码**：克隆后在 `.runtime/venv` 中执行 `flit install --pth-file`。
+6. **checkpoint**：`python -m wmcf.carla.checkpoints --download four_lane --dest checkpoints`。
+
+目录结构约定（`.runtime/` 与 `checkpoints/` 均被 `.gitignore` 排除）：
+
+```text
+world_model_cf/
+├── .runtime/
+│   ├── CARLA_0.9.15/   # CarlaUE4.exe
+│   ├── CarDreamer/     # 源码
+│   └── venv/           # Python 3.10 + 依赖
+├── checkpoints/
+│   └── four_lane.ckpt
+└── outputs/            # 视频、KPI、图
+```
+
+### 0.4 复刻命令
+
+```powershell
+# 1) 启动 CARLA（离屏、低画质、2000 端口）
+Start-Process ".runtime\CARLA_0.9.15\CarlaUE4.exe" -ArgumentList "-carla-port=2000 -RenderOffScreen -quality-level=Low -unattended"
+
+# 2) 预载 Town04，避免 WorldManager 的 20 秒超时
+& ".runtime\venv\Scripts\python.exe" -c "import carla; c=carla.Client('127.0.0.1',2000); c.set_timeout(60.0); c.load_world('Town04'); print('Town04 cached')"
+
+# 3) 闭环演示 + 双视角视频
+& ".runtime\venv\Scripts\python.exe" -m wmcf.carla.run_demo --cardreamer ".runtime\CarDreamer" --carla-root ".runtime\CARLA_0.9.15" --checkpoint "checkpoints\four_lane.ckpt" --task carla_four_lane --steps 1000 --platform cpu --logdir "outputs\carla_showcase" --save-video
+
+# 4) 反事实干预：KPI + 分歧曲线 + 宫格视频
+& ".runtime\venv\Scripts\python.exe" -m wmcf.carla.counterfactual_demo --cardreamer ".runtime\CarDreamer" --carla-root ".runtime\CARLA_0.9.15" --checkpoint "checkpoints\four_lane.ckpt" --kpi-episodes 3 --anchors 4 --horizon 60 --platform cpu --logdir "outputs\carla_cf"
+```
+
+### 0.5 已知坑
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| `load_world("Town04")` 超时 | 首次加载地图缓存超过 20 秒；先执行上面的预载命令 |
+| JAX 报找不到 GPU | 原生 Windows 的 JAX 0.4.34 是 CPU 后端；运行脚本必须加 `--platform cpu` |
+| 启动弹 `DirectX Runtime` 错误 | 安装离线 DirectX 运行库，见 0.3 |
+| 降低 `num_vehicles` 后频繁提前结束 | 策略训练分布是 50 辆；实测降到 10 辆时回报只有 281–409，演示保持 50 |
+| 同样 seed 结果不同 | Traffic Manager 的随机源未被固定；KPI 需多 episode 取均值，不能合并不同次的样本 |
+
+---
+
 ## 1. 研究问题与假设
 
 ### 1.1 问题
@@ -147,6 +230,9 @@ world_model_cf/
 │   ├── counterfactual.py         # 干预、分歧指标、图表与 JSON
 │   └── carla/
 │       ├── checkpoints.py        # CarDreamer checkpoint 列表/下载/检查
+│       ├── load_check.py         # 纯 JAX 加载 checkpoint 并输出动作自检
+│       ├── run_demo.py           # 四车道闭环推理 + 双视角视频
+│       ├── counterfactual_demo.py # do(a') 干预、分歧曲线、分支视频
 │       └── summarize_eval.py     # CarDreamer metrics.jsonl → 报告表格/图
 └── outputs/                      # 运行产物（自动创建）
     ├── runs/<run_name>/          # wm.pt / ac.pt / 日志 / 配置快照
@@ -181,6 +267,8 @@ py -m pip install -r requirements.txt
 如果 `py` 不可用，把命令里的 `py` 换成 `python`。
 GPU 机器请先按 PyTorch 官网命令安装对应 CUDA 版本的 wheel，再装其余依赖。
 
+CARLA 线不复用上述 PyTorch 环境，改用独立的 Python 3.10 + JAX 环境，见 0.3。
+
 ### 5.2 硬件建议
 
 | 场景 | 配置 | 说明 |
@@ -207,7 +295,7 @@ GPU 机器请先按 PyTorch 官网命令安装对应 CUDA 版本的 wheel，再�
 
 ## 6. 运行流程
 
-所有命令都在 `world_model_cf/` 目录下执行。
+所有命令都在 `world_model_cf/` 目录下执行。本节是合成环境线；CARLA 线的命令见 0.4。
 
 ### 6.1 冒烟测试（必须最先跑）
 
