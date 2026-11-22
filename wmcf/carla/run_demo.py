@@ -153,6 +153,15 @@ def main() -> int:
         video_dir.mkdir(parents=True, exist_ok=True)
     episode_count = [0]
 
+    import imageio.v2 as imageio
+
+    show_w, show_h, size, bar = 1024, 580, 512, 24
+    presentation_writer = None
+    if args.save_video:
+        presentation_writer = imageio.get_writer(
+            video_dir / "drive_showcase.mp4", fps=10, macro_block_size=None
+        )
+
     def per_episode(ep, ep_info, worker):
         length = len(ep["reward"]) - 1
         score = float(ep["reward"].astype(np.float64).sum())
@@ -161,15 +170,67 @@ def main() -> int:
         print(f"[episode {episode_count[0]}] steps={length} return={score:.1f}")
         if args.save_video and "camera" in ep:
             try:
-                import imageio.v2 as imageio
+                import cv2
 
-                frames = [f for f in ep["camera"]]
-                # 相机首帧到达前会插入全黑占位帧，去掉片头黑帧
-                while frames and not np.asarray(frames[0]).any():
-                    frames.pop(0)
+                frames = [np.asarray(f) for f in ep["camera"]]
+                birdeye = [np.asarray(f) for f in ep.get("birdeye_wpt", [])]
+                acts = np.asarray(ep["action"])
+                # 相机首帧到达前会插入全黑占位帧，去掉片头黑帧（三路同步裁剪）
+                start = 0
+                while start < len(frames) and not frames[start].any():
+                    start += 1
+                frames = frames[start:]
+                if len(birdeye) == len(ep["camera"]):
+                    birdeye = birdeye[start:]
+                    acts = acts[start:]
+                else:
+                    birdeye = []
+
                 out = video_dir / f"episode_{episode_count[0]:03d}.mp4"
                 imageio.mimsave(out, frames, fps=10)
                 print(f"[video] {out}")
+
+                if birdeye and presentation_writer is not None:
+                    if episode_count[0] > 1:
+                        for _ in range(5):
+                            card = np.zeros((show_h, show_w, 3), np.uint8)
+                            cv2.putText(card, f"Episode {episode_count[0]}",
+                                        (show_w // 2 - 80, show_h // 2),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                                        (255, 255, 255), 2, cv2.LINE_AA)
+                            presentation_writer.append_data(card)
+                    for i, (cam, bev) in enumerate(zip(frames, birdeye)):
+                        panel = np.zeros((show_h, show_w, 3), np.uint8)
+                        panel[bar:bar + size, :size] = cv2.resize(
+                            cam, (size, size), interpolation=cv2.INTER_AREA)
+                        panel[bar:bar + size, size:] = cv2.resize(
+                            bev, (size, size), interpolation=cv2.INTER_NEAREST)
+                        cv2.putText(panel, "camera (what driver sees)", (6, 17),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(panel, "birdeye_wpt (what world model sees)", (size + 6, 17),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+                        idx = int(np.argmax(acts[i])) if i < len(acts) else -1
+                        if idx >= 0:
+                            acc = (-2, 0, 2)[idx // 5]
+                            steer = -(-0.6, -0.2, 0.0, 0.2, 0.6)[idx % 5]
+                            cv2.putText(
+                                panel,
+                                f"step {i + 1:03d} | policy action {idx:02d}: "
+                                f"acc {acc:+.0f} m/s2, steer {steer:+.2f}",
+                                (6, bar + size + 21), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (230, 230, 230), 1, cv2.LINE_AA)
+                            for j in range(15):
+                                x0 = show_w - 456 + j * 30
+                                color = (0, 220, 0) if j == idx else (65, 65, 65)
+                                cv2.rectangle(panel, (x0, bar + size + 7),
+                                              (x0 + 26, bar + size + 31), color, -1)
+                        cv2.putText(
+                            panel,
+                            "world model loop: camera + BEV -> encoder -> RSSM latent -> policy -> discrete action",
+                            (6, show_h - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.42, (170, 170, 170), 1, cv2.LINE_AA)
+                        presentation_writer.append_data(panel)
             except Exception as exc:  # 视频是可选产物，失败不影响 KPI
                 print(f"[warn] 视频保存失败：{exc}")
         logger.write()
@@ -183,6 +244,9 @@ def main() -> int:
     while step < run_args.steps:
         driver(policy, steps=100)
     logger.write()
+    if presentation_writer is not None:
+        presentation_writer.close()
+        print(f"[video] {video_dir / 'drive_showcase.mp4'}")
     print(f"Done. KPI -> {Path(args.logdir) / 'metrics.jsonl'}")
     return 0
 

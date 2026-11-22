@@ -36,6 +36,17 @@ INTERVENTIONS = {
     "do(右转)": 9,
 }
 
+BRANCH_VIDEOS = {
+    "real": ("branch_real.mp4", "real observation"),
+    "factual": ("branch_factual.mp4", "imagination (factual)"),
+    "do(刹车)": ("branch_do_brake.mp4", "do(brake) imagination"),
+    "do(保持)": ("branch_do_hold.mp4", "do(hold) imagination"),
+    "do(加速)": ("branch_do_accelerate.mp4", "do(accelerate) imagination"),
+    "do(左转)": ("branch_do_left.mp4", "do(left) imagination"),
+    "do(右转)": ("branch_do_right.mp4", "do(right) imagination"),
+    "noise": ("branch_noise_floor.mp4", "noise floor imagination"),
+}
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -318,6 +329,7 @@ def _analyse(args, agent, ep, logdir: Path):
     for name in INTERVENTIONS:
         curves[name] = []
     video_branch = None
+    video_anchor = None
 
     for anchor in anchors:
         start = posts[anchor]
@@ -345,6 +357,7 @@ def _analyse(args, agent, ep, logdir: Path):
 
         if video_branch is None:
             video_branch = branch_frames
+            video_anchor = anchor
 
     summary = {}
     for name, seq in curves.items():
@@ -394,8 +407,62 @@ def _analyse(args, agent, ep, logdir: Path):
     # ---- 对比视频 ----
     if video_branch:
         _save_grid_video(video_branch, logdir, args.horizon, args.fps)
+        camera = np.asarray(ep.get("camera", []), dtype=np.uint8)
+        if len(camera):
+            _save_branch_videos(
+                camera, video_branch, video_anchor, logdir, args.horizon, args.fps
+            )
 
     return metrics
+
+
+def _save_branch_videos(camera, branches: dict, anchor: int, logdir: Path,
+                        horizon: int, fps: int = 5) -> None:
+    """每个分支一段视频：左侧真实相机参考，右侧该分支的世界模型想象 BEV。"""
+    import cv2
+    import imageio.v2 as imageio
+    import numpy as np
+
+    size, bar, foot = 512, 24, 22
+    video_dir = logdir / "videos"
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    camera_slice = np.asarray(
+        camera[anchor + 1:anchor + 1 + horizon], dtype=np.uint8
+    )
+    packed = {"camera": camera_slice}
+
+    for name, frames in branches.items():
+        if name not in BRANCH_VIDEOS:
+            continue
+        filename, title = BRANCH_VIDEOS[name]
+        ascii_name = filename[len("branch_"):-len(".mp4")].replace("_", " ")
+        frames = np.asarray(frames)
+        packed[ascii_name.replace(" ", "_")] = frames
+        if np.issubdtype(frames.dtype, np.floating):
+            frames = np.clip(frames * 255.0, 0, 255).astype(np.uint8)
+        out = []
+        for t in range(horizon):
+            canvas = np.zeros((size + bar + foot, size * 2, 3), np.uint8)
+            cam = camera[min(anchor + 1 + t, len(camera) - 1)]
+            bev = frames[min(t, len(frames) - 1)]
+            canvas[bar:bar + size, :size] = cv2.resize(
+                cam, (size, size), interpolation=cv2.INTER_AREA)
+            canvas[bar:bar + size, size:] = cv2.resize(
+                bev, (size, size), interpolation=cv2.INTER_NEAREST)
+            cv2.putText(canvas, "camera (real reference)", (6, 17),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"{title} (BEV)", (size + 6, 17),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"left: factual real camera | right: world-model {ascii_name} | step {t + 1}/{horizon}",
+                        (6, size + bar + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (200, 200, 200), 1, cv2.LINE_AA)
+            out.append(canvas)
+        path = video_dir / filename
+        imageio.mimsave(path, out, fps=fps)
+        print(f"[cf] {path}")
+
+    np.savez_compressed(logdir / "branches.npz", **packed)
 
 
 def _save_grid_video(branches: dict, logdir: Path, horizon: int, fps: int = 5) -> None:
@@ -487,7 +554,8 @@ def main() -> int:
         row.update(_episode_kpis(ep_info))
         rows.append(row)
         last["ep"] = {"birdeye_wpt": np.asarray(ep["birdeye_wpt"]),
-                      "action": np.asarray(ep["action"])}
+                      "action": np.asarray(ep["action"]),
+                      "camera": np.asarray(ep.get("camera", []), dtype=np.uint8)}
         print(f"[episode {row['episode']}] seed={row['seed']} steps={length} "
               f"return={score:.1f} collision={row['collision']} "
               f"dest={row['destination']} lane={row['out_of_lane']}")

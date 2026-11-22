@@ -347,6 +347,37 @@ CarDreamer 的 DreamerV3 是 JAX 实现，内部接口大致为：
 | `outputs/carla_cf/videos/cf_grid.mp4` | 8 宫格对比，60 步、12 秒、5 fps |
 | `outputs/carla_demo_video/videos/episode_001.mp4` | 前视相机闭环演示，512×512、45 秒 |
 
+### 5.6 演示视频（2026-11-22）
+
+用途：课堂/答辩现场播放，不参与结论统计。
+
+| 项 | 值 |
+| --- | --- |
+| 文件 | `outputs/carla_showcase/videos/drive_showcase.mp4`（本地生成，`outputs/` 不入库） |
+| 规格 | 91.6 秒，1024×580，10 fps |
+| 结构 | 左右双视角 + 底部动作条；两段 episode 用 `Episode 2` 卡片连接 |
+| Episode 1 | 461 步，回报 1061.4，每步回报 2.302 |
+| Episode 2 | 452 步，回报 1037.6，每步回报 2.296 |
+
+画面含义：
+
+- 左：`camera (what driver sees)`，CARLA 真实前视渲染，仅给人看；
+- 右：`birdeye_wpt (what world model sees)`，策略实际输入；
+- 底部：策略选出的离散动作（加速度 + 转向）及 15 维 one-hot；
+- 最下方：`camera + BEV -> encoder -> RSSM latent -> policy -> discrete action`。
+
+配置说明：
+
+- 为让画面更接近人眼，录制时把 `camera.fov` 从 `120` 改为 `90`；该参数只影响录像。`carla_four_lane` 的 `encoder.cnn_keys` 只有 `birdeye_wpt`，策略输入与行为不受影响。
+- 该修改位于本地 `.runtime` 配置中，不随仓库分发；重装 CarDreamer 后需重新设置。
+- 曾尝试把 `num_vehicles` 从 50 降到 10 以降低视觉车流密度，结果 episode 提前终止、回报降至 281–409，说明策略对车流密度敏感（训练分布为 50 辆），因此演示保留 50 辆。
+
+解读边界：
+
+- 两段是同一策略的独立采样，起点车道、随机路线、背景交通都不同，总回报差异主要来自 episode 长度，不能当作策略优劣或方法对比。
+- 两段均在 `time_limit=500` 前结束，回报处于到达终点量级；`run_demo.py` 当前只记录长度与回报，未单独记录 `collision` 标志。
+- 视频展示的是「世界模型驱动的闭环行驶」，不是反事实想象，也不是训练过程。
+
 ---
 
 ## 6. 报告图表清单
@@ -359,7 +390,7 @@ CarDreamer 的 DreamerV3 是 JAX 实现，内部接口大致为：
 | 分歧曲线（驾驶） | 5.5 运行 A/B（`outputs/carla_cf/divergence.png`） | 20 步与 60 步两组，已实测 |
 | 噪声底 / SNR | `divergence.json` | 判断分歧是否显著 |
 | 闭环 KPI 表 | 5.5 运行 A/B（`kpi_table.md`） | collision / success / 横向偏差 |
-| 视频 | `outputs/carla_cf/videos/cf_grid.mp4`、`outputs/carla_demo_video/videos/episode_001.mp4` | 报告现场播放 |
+| 视频 | `outputs/carla_cf/videos/cf_grid.mp4`、`outputs/carla_showcase/videos/drive_showcase.mp4` | 反事实对比 + 双视角闭环演示，报告现场播放 |
 
 ---
 
