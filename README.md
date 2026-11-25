@@ -20,6 +20,7 @@
 | 四车道闭环演示 | 已完成 | 91.6 秒双视角视频，两段 episode 461 / 452 步，回报 1061.4 / 1037.6 |
 | 反事实干预 | 已完成 | 3 个 seed 的闭环 KPI + 4 个起点 × 60 步潜空间分歧、噪声底与显著性阈值 |
 | 文档与脚本 | 已完成 | commit `805cadd`，细节见 [docs/autonomous_driving.md](docs/autonomous_driving.md) 第 5.5、5.6 节 |
+| 展示素材图库 | 已完成 | 所有图片/视频的路径、规格、画面含义与复现命令见 [docs/media_gallery.md](docs/media_gallery.md) |
 
 ### 0.2 尚未完成
 

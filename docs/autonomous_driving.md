@@ -605,6 +605,8 @@ CarDreamer 的 DreamerV3 是 JAX 实现，内部接口大致为：
 | 闭环 KPI 表 | 5.5 运行 A/B（`kpi_table.md`） | collision / success / 横向偏差 |
 | 视频 | `outputs/carla_cf/videos/cf_grid.mp4`、`outputs/carla_showcase/videos/drive_showcase.mp4` | 反事实对比 + 双视角闭环演示，报告现场播放 |
 
+> 以上图片/视频的完整清单（路径、分辨率、时长、画面含义、对应 episode 数据与复现命令）见 [media_gallery.md](media_gallery.md)。
+
 ---
 
 ## 7. 风险与降级方案
